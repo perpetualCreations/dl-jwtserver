@@ -59,11 +59,13 @@ config.read("main.cfg")
 app = Flask(__name__)
 api = Api(app)
 
-DATABASE_KEY_LOOKUP = {
+KEY_LOOKUP = {
     "username": str,
     "email": str,
-    "ed25519": str,
-    "password": str
+    "ed25519key": str,
+    "password": str,
+    "answer": str,
+    "new": dict
 }
 
 
@@ -165,6 +167,10 @@ class Auth(Resource):
         arguments = request.get_json()
         try:
             assert arguments is not None
+            for key in arguments:
+                key = str(key)
+                if not isinstance(arguments[key], KEY_LOOKUP[key]):
+                    return "Argument " + key + " is of invalid type."
         except AssertionError:
             return "Missing arguments required to process request."
         return arguments
@@ -213,7 +219,7 @@ class Auth(Resource):
         """
         try:
             assert data["mode"] in ["ed25519", "password"]
-            authenticator = AuthProcessor(username, str(data["answer"]),
+            authenticator = AuthProcessor(username, data["answer"],
                                           data["mode"])
             if authenticator.result.successful is False:
                 if authenticator.result.error:
@@ -260,19 +266,18 @@ class Auth(Resource):
             assert not database.search(where("username") == username)
             new_user = {
                 "username": username,
-                "email": str(data["email"]),
+                "email": data["email"],
             }
             if "password" in data:
                 new_user.update({
-                    "password": self._auth_password_process(
-                        str(data["password"]))
+                    "password": self._auth_password_process(data["password"])
                 })
             if "ed25519key" in data:
-                check = self._auth_ed25519_process(str(data["ed25519key"]))
+                check = self._auth_ed25519_process(data["ed25519key"])
                 if check:
                     return {"error": check}, 400
                 new_user.update({
-                    "ed25519key": str(data["ed25519key"])
+                    "ed25519key": data["ed25519key"]
                 })
             database.insert(new_user)
         except AssertionError:
@@ -315,8 +320,8 @@ class Auth(Resource):
             return response
         invalid_keys = []
         for key in data["new"]:
-            if key in DATABASE_KEY_LOOKUP:
-                if isinstance(data["new"][key], DATABASE_KEY_LOOKUP[key]):
+            if key in KEY_LOOKUP:
+                if isinstance(data["new"][key], KEY_LOOKUP[key]):
                     if key == "ed25519key":
                         check = self._auth_ed25519_process(data["new"][key])
                         if check:
