@@ -174,7 +174,7 @@ class Auth(Resource):
             return {"error": data}, 400
         try:
             assert data["mode"] in ["ed25519", "password"]
-            authenticator = AuthProcessor(username, data["answer"],
+            authenticator = AuthProcessor(username, str(data["answer"]),
                                           data["mode"])
             if authenticator.result.successful is False:
                 if authenticator.result.error:
@@ -206,7 +206,7 @@ class Auth(Resource):
             assert not database.search(where("username") == username)
             new_user = {
                 "username": username,
-                "email": data["email"],
+                "email": str(data["email"]),
             }
             if "password" in data:
                 digest = hashes.Hash(hashes.SHA3_512())
@@ -231,6 +231,35 @@ class Auth(Resource):
         except InvalidKey:
             return {"error": "Arguments includes an invalid key."}, 400
         return {"info": "User " + username + " successfully created."}, 201
+
+    def delete(self, username: str):
+        """
+        Respond to resource DELETE requests.
+
+        Return code 204 if given proper authentication, or error message if \
+            given missing, invalid, or malformed authentication.
+        """
+        data = self._retrieve_request_data()
+        if isinstance(data, str):
+            return {"error": data}, 400
+        try:
+            assert data["mode"] in ["ed25519", "password"]
+            authenticator = AuthProcessor(username, str(data["answer"]),
+                                          data["mode"])
+            if authenticator.result.successful is False:
+                if authenticator.result.error:
+                    return {"error": authenticator.result.error}, 401
+                return {"error": "Authentication failed with an unspecified "
+                        "error."}, 401
+        except AssertionError:
+            return {"error": "Invalid authentication mode."}, 400
+        except KeyError:
+            return {"error": "Missing arguments required to process request."},
+            400
+        except ValueError:
+            return {"error": "User does not exist."}, 404
+        database.remove(where("username") == username)
+        return {"info": "User " + username + " successfully deleted."}, 204
 
 
 api.add_resource(Auth, "/claims/<string:username>")
