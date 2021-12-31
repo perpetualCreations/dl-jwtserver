@@ -59,6 +59,13 @@ config.read("main.cfg")
 app = Flask(__name__)
 api = Api(app)
 
+DATABASE_KEY_LOOKUP = {
+    "username": str,
+    "email": str,
+    "ed25519": str,
+    "password": str
+}
+
 
 class AuthProcessor:
     """Class for authentication processing."""
@@ -162,6 +169,39 @@ class Auth(Resource):
             return "Missing arguments required to process request."
         return arguments
 
+    @staticmethod
+    def _auth_password_process(password: str) -> str:
+        """
+        Convert plain-text password to Base64-encoded hash, made with the \
+            server's generated salt.
+
+        :param password: plain-text password
+        :type password: str
+        :return: Base64-encoded hash
+        :rtype: str
+        """
+        digest = hashes.Hash(hashes.SHA3_512())
+        digest.update((password + salt).encode())
+        return b64encode(digest.finalize()).decode()
+
+    @staticmethod
+    def _auth_ed25519_process(pem_key: str) -> Optional[str]:
+        """
+        Check given key, then returns error string if invalid.
+
+        :param pem_key: PEM-formatted public key, supposedly ED25519
+        :type pem_key: str
+        :return: optionally error string if invalid
+        :rtype: Optional[str]
+        """
+        try:
+            if not isinstance(serialization.load_pem_public_key(
+                    pem_key.encode()), ed25519.Ed25519PublicKey):
+                raise InvalidKey()
+        except InvalidKey:
+            return "Arguments includes an invalid key."
+        return None
+
     def get(self, username: str):
         """
         Respond to resource GET requests.
@@ -209,18 +249,16 @@ class Auth(Resource):
                 "email": str(data["email"]),
             }
             if "password" in data:
-                digest = hashes.Hash(hashes.SHA3_512())
-                digest.update((str(data["password"]) + salt).encode())
                 new_user.update({
-                    "password": b64encode(digest.finalize()).decode()
+                    "password": self._auth_password_process(
+                        str(data["password"]))
                 })
             if "ed25519key" in data:
-                if not isinstance(serialization.load_pem_public_key(
-                        data["ed25519key"].encode()),
-                                  ed25519.Ed25519PublicKey):
-                    raise InvalidKey()
+                check = self._auth_ed25519_process(str(data["ed25519key"]))
+                if check:
+                    return {"error": check}, 400
                 new_user.update({
-                    "ed25519key": data["ed25519key"]
+                    "ed25519key": str(data["ed25519key"])
                 })
             database.insert(new_user)
         except AssertionError:
@@ -228,15 +266,13 @@ class Auth(Resource):
         except KeyError:
             return {"error": "Missing arguments required to process request."},
             400
-        except InvalidKey:
-            return {"error": "Arguments includes an invalid key."}, 400
         return {"info": "User " + username + " successfully created."}, 201
 
     def delete(self, username: str):
         """
         Respond to resource DELETE requests.
 
-        Return code 204 if given proper authentication, or error message if \
+        Return code 200 if given proper authentication, or error message if \
             given missing, invalid, or malformed authentication.
         """
         data = self._retrieve_request_data()
@@ -259,7 +295,56 @@ class Auth(Resource):
         except ValueError:
             return {"error": "User does not exist."}, 404
         database.remove(where("username") == username)
-        return {"info": "User " + username + " successfully deleted."}, 204
+        return {"info": "User " + username + " successfully deleted."}, 200
+
+    def patch(self, username: str):
+        """
+        Respond to resource PATCH requests.
+
+        Return code 200 if given proper authentication, or error message if \
+            given missing invalid or malformed authentication, and given \
+                proper parameters, or error message if given missing, \
+                    invalid, or malformed parameters.
+        """
+        data = self._retrieve_request_data()
+        if isinstance(data, str):
+            return {"error": data}, 400
+        try:
+            assert data["mode"] in ["ed25519", "password"]
+            authenticator = AuthProcessor(username, str(data["answer"]),
+                                          data["mode"])
+            if authenticator.result.successful is False:
+                if authenticator.result.error:
+                    return {"error": authenticator.result.error}, 401
+                return {"error": "Authentication failed with an unspecified "
+                        "error."}, 401
+        except AssertionError:
+            return {"error": "Invalid authentication mode."}, 400
+        except KeyError:
+            return {"error": "Missing arguments required to process request."},
+            400
+        except ValueError:
+            return {"error": "User does not exist."}, 404
+        invalid_keys = []
+        for key in data["new"]:
+            if key in DATABASE_KEY_LOOKUP:
+                if isinstance(data["new"][key], DATABASE_KEY_LOOKUP[key]):
+                    if key == "ed25519key":
+                        check = self._auth_ed25519_process(data["new"][key])
+                        if check:
+                            return {"error": check}, 400
+                    elif key == "password":
+                        data["new"][key] = self._auth_password_process(
+                            data["new"][key])
+                else:
+                    return {"error",
+                            "Argument " + key + " is of invalid type."}
+            else:
+                invalid_keys.append(key)
+        for key in invalid_keys:
+            data["new"].pop(key)
+        database.update(data["new"], where("username") == username)
+        return {"info": "User " + username + " successfully updated."}, 200
 
 
 api.add_resource(Auth, "/claims/<string:username>")
