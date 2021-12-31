@@ -19,7 +19,7 @@ import jwt
 from cryptography.hazmat.primitives.asymmetric import rsa, ed25519
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.exceptions import InvalidSignature, InvalidKey
-from tinydb import TinyDB, Query
+from tinydb import TinyDB, where
 from flask import Flask, request
 from flask_restful import Resource, Api
 
@@ -86,7 +86,8 @@ class AuthProcessor:
         """
         self.username: str = username
         self.answer: str = answer
-        record: List[dict] = database.search(Query().name == self.username)
+        record: List[dict] = database.search(
+            where("username") == self.username)
         if not record:
             raise ValueError("User does not exist!")
         self.record: dict = record.pop()
@@ -161,7 +162,7 @@ class Auth(Resource):
             return "Missing arguments required to process request."
         return arguments
 
-    def get(self, username: str) -> dict:
+    def get(self, username: str):
         """
         Respond to resource GET requests.
 
@@ -170,23 +171,66 @@ class Auth(Resource):
         """
         data = self._retrieve_request_data()
         if isinstance(data, str):
-            return {"error": data}
+            return {"error": data}, 400
         try:
             assert data["mode"] in ["ed25519", "password"]
             authenticator = AuthProcessor(username, data["answer"],
                                           data["mode"])
             if authenticator.result.successful is False:
                 if authenticator.result.error:
-                    return {"error": authenticator.result.error}
+                    return {"error": authenticator.result.error}, 401
                 return {"error": "Authentication failed with an unspecified "
-                        "error."}
+                        "error."}, 401
         except AssertionError:
-            return {"error": "Invalid authentication mode."}
+            return {"error": "Invalid authentication mode."}, 400
         except KeyError:
-            return {"error": "Missing arguments required to process request."}
+            return {"error": "Missing arguments required to process request."},
+            400
         except ValueError:
-            return {"error": "User does not exist."}
-        return {"jwt": authenticator.create_jwt()}
+            return {"error": "User does not exist."}, 404
+        return {"jwt": authenticator.create_jwt()}, 200
+
+    def put(self, username: str):
+        """
+        Respond to resource PUT requests.
+
+        Return code 201 if given proper parameters, or error message if given \
+            missing, invalid, or malformed parameters.
+        """
+        data = self._retrieve_request_data()
+        if isinstance(data, str):
+            return {"errors": data}, 400
+        if "email" not in data:
+            data["email"] = "user@0.0.0.0"
+        try:
+            assert not database.search(where("username") == username)
+            new_user = {
+                "username": username,
+                "email": data["email"],
+            }
+            if "password" in data:
+                digest = hashes.Hash(hashes.SHA3_512())
+                digest.update((str(data["password"]) + salt).encode())
+                new_user.update({
+                    "password": b64encode(digest.finalize()).decode()
+                })
+            if "ed25519key" in data:
+                if not isinstance(serialization.load_pem_public_key(
+                        data["ed25519key"].encode()),
+                                  ed25519.Ed25519PublicKey):
+                    raise InvalidKey()
+                new_user.update({
+                    "ed25519key": data["ed25519key"]
+                })
+            database.insert(new_user)
+        except AssertionError:
+            return {"error": "User already exists."}, 409
+        except KeyError:
+            return {"error": "Missing arguments required to process request."},
+            400
+        except InvalidKey:
+            return {"error": "Arguments includes an invalid key."}, 400
+        return {"info": "User " + username + " successfully created."}, 201
 
 
 api.add_resource(Auth, "/claims/<string:username>")
