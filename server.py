@@ -26,22 +26,23 @@ from flask_restful import Resource, Api
 
 if not isfile("keys/private.pem"):
     private = rsa.generate_private_key(65537, 4096)
-    with open("keys/private.pem", "wb") as private_key_handler:
+    with open("keys/private.pem", "w") as private_key_handler:
         private_key_handler.write(private.private_bytes(
             serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
-            serialization.NoEncryption()))
-    remove("keys/public.pem")
+            serialization.NoEncryption()).decode())
+    if isfile("keys/public.pem"):
+        remove("keys/public.pem")
 else:
-    with open("keys/private.pem", "wb") as private_key_handler:
+    with open("keys/private.pem") as private_key_handler:
         private = serialization.load_pem_private_key(  # type: ignore
-            private_key_handler.read(), None)
+            private_key_handler.read().encode(), None)
         assert isinstance(private, rsa.RSAPrivateKey)
 
 if not isfile("keys/public.pem"):
-    with open("keys/public.pem", "wb") as public_key_handler:
+    with open("keys/public.pem", "w") as public_key_handler:
         public_key_handler.write(private.public_key().public_bytes(
             serialization.Encoding.PEM,
-            serialization.PublicFormat.SubjectPublicKeyInfo))
+            serialization.PublicFormat.SubjectPublicKeyInfo).decode())
 
 if not isfile("keys/salt"):
     salt = "".join([choice(ascii_letters) for _ in range(128)])
@@ -65,7 +66,8 @@ KEY_LOOKUP = {
     "ed25519key": str,
     "password": str,
     "answer": str,
-    "new": dict
+    "new": dict,
+    "mode": str
 }
 
 
@@ -123,6 +125,11 @@ class AuthProcessor:
                         False, "Unable to import user's ed25519 key. Please "
                         "use another authentication mechanism, or contact "
                         "server administrator(s).")
+                except ValueError:
+                    self.result = AuthProcessor.AuthResult(
+                        False, "Unable to import user's ed25519 key. Please "
+                        "use another authentication mechanism, or contact "
+                        "server administrator(s).")
         elif self.mode == "password":
             if "password" not in self.record.keys():
                 self.result = AuthProcessor.AuthResult(
@@ -157,20 +164,35 @@ class AuthProcessor:
 class Auth(Resource):
     """Object representation of authentication resource."""
 
-    def _retrieve_request_data(self) -> Union[str, dict]:
+    def _retrieve_request_data(self, data: Optional[dict] = None) -> \
+            Union[str, dict]:
         """
-        Retrieve safely JSON data from the request.
+        Retrieve safely JSON data from the request, or check given JSON data.
 
+        :param data: JSON data, if not provided, retrieved from Flask request
+        :type data: Optional[dict]
         :return: JSON data as dictionary, or error string
         :rtype: Union[str, dict]
         """
-        arguments = request.get_json()
+        if data:
+            arguments = data
+        else:
+            arguments = request.get_json()  # type: ignore
         try:
             assert arguments is not None
             for key in arguments:
-                key = str(key)
-                if not isinstance(arguments[key], KEY_LOOKUP[key]):
-                    return "Argument " + key + " is of invalid type."
+                if key in KEY_LOOKUP:
+                    if not isinstance(arguments[key], KEY_LOOKUP[key]):
+                        return "Argument " + key + " is of invalid type."
+            if "new" in arguments:
+                # this is a vulnerability, if a malicious actor sends a request
+                # with a large number of nested "new" attributes, then the
+                # server will have to recursively process each nested layer.
+                # when setting up a production server, remember to set a worker
+                # timeout, or a low maximum request size!
+                new_check = self._retrieve_request_data(arguments["new"])
+                if isinstance(new_check, str):
+                    return new_check
         except AssertionError:
             return "Missing arguments required to process request."
         return arguments
@@ -205,7 +227,9 @@ class Auth(Resource):
                     pem_key.encode()), ed25519.Ed25519PublicKey):
                 raise InvalidKey()
         except InvalidKey:
-            return "Arguments includes an invalid key."
+            return "Arguments include an invalid key."
+        except ValueError:
+            return "Arguments include an invalid key."
         return None
 
     def _auth_boilerplate(self, username: str, data: dict) -> \
@@ -283,8 +307,8 @@ class Auth(Resource):
         except AssertionError:
             return {"error": "User already exists."}, 409
         except KeyError:
-            return {"error": "Missing arguments required to process request."},
-            400
+            return {"error": "Missing arguments required to process"
+                    " request."}, 400
         return {"info": "User " + username + " successfully created."}, 201
 
     def delete(self, username: str):
@@ -319,6 +343,9 @@ class Auth(Resource):
         if not isinstance(response, AuthProcessor):
             return response
         invalid_keys = []
+        if "new" not in data:
+            return {"error": "Missing arguments required to process"
+                    " request."}, 400
         for key in data["new"]:
             if key in KEY_LOOKUP:
                 if isinstance(data["new"][key], KEY_LOOKUP[key]):
@@ -329,9 +356,13 @@ class Auth(Resource):
                     elif key == "password":
                         data["new"][key] = self._auth_password_process(
                             data["new"][key])
+                    elif key == "username":
+                        if database.search(where("username") ==
+                                           data["new"][key]):
+                            return {"error": "User already exists."}, 409
                 else:
-                    return {"error",
-                            "Argument " + key + " is of invalid type."}
+                    return {"error", "Argument " + key +
+                            " is of invalid type."}
             else:
                 invalid_keys.append(key)
         for key in invalid_keys:
