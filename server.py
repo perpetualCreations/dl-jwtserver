@@ -9,7 +9,7 @@ A light-weight JWT authentication server.
 import configparser
 from os.path import isfile
 from os import remove
-from typing import List, Literal, Optional, Union
+from typing import List, Literal, Optional, Union, Tuple
 from base64 import b64decode, b64encode
 from random import choice
 from string import ascii_letters
@@ -202,16 +202,15 @@ class Auth(Resource):
             return "Arguments includes an invalid key."
         return None
 
-    def get(self, username: str):
+    def _auth_boilerplate(self, username: str, data: dict) -> \
+            Union[Tuple[dict, int], AuthProcessor]:
         """
-        Respond to resource GET requests.
+        Handle common authentication between responses.
 
-        Return JWT if given proper authentication, or error message if given \
-            missing, invalid, or malformed authentication.
+        :return: error response if relevant, or if successful, the
+            AuthProcessor instance
+        :rtype: Union[Tuple[dict, int], AuthProcessor]
         """
-        data = self._retrieve_request_data()
-        if isinstance(data, str):
-            return {"error": data}, 400
         try:
             assert data["mode"] in ["ed25519", "password"]
             authenticator = AuthProcessor(username, str(data["answer"]),
@@ -224,11 +223,26 @@ class Auth(Resource):
         except AssertionError:
             return {"error": "Invalid authentication mode."}, 400
         except KeyError:
-            return {"error": "Missing arguments required to process request."},
-            400
+            return {"error": "Missing arguments required to process "
+                    "request."}, 400
         except ValueError:
             return {"error": "User does not exist."}, 404
-        return {"jwt": authenticator.create_jwt()}, 200
+        return authenticator
+
+    def get(self, username: str):
+        """
+        Respond to resource GET requests.
+
+        Return JWT if given proper authentication, or error message if given \
+            missing, invalid, or malformed authentication.
+        """
+        data = self._retrieve_request_data()
+        if isinstance(data, str):
+            return {"error": data}, 400
+        response = self._auth_boilerplate(username, data)
+        if not isinstance(response, AuthProcessor):
+            return response
+        return {"jwt": response.create_jwt()}, 200
 
     def put(self, username: str):
         """
@@ -278,22 +292,9 @@ class Auth(Resource):
         data = self._retrieve_request_data()
         if isinstance(data, str):
             return {"error": data}, 400
-        try:
-            assert data["mode"] in ["ed25519", "password"]
-            authenticator = AuthProcessor(username, str(data["answer"]),
-                                          data["mode"])
-            if authenticator.result.successful is False:
-                if authenticator.result.error:
-                    return {"error": authenticator.result.error}, 401
-                return {"error": "Authentication failed with an unspecified "
-                        "error."}, 401
-        except AssertionError:
-            return {"error": "Invalid authentication mode."}, 400
-        except KeyError:
-            return {"error": "Missing arguments required to process request."},
-            400
-        except ValueError:
-            return {"error": "User does not exist."}, 404
+        response = self._auth_boilerplate(username, data)
+        if not isinstance(response, AuthProcessor):
+            return response
         database.remove(where("username") == username)
         return {"info": "User " + username + " successfully deleted."}, 200
 
@@ -309,22 +310,9 @@ class Auth(Resource):
         data = self._retrieve_request_data()
         if isinstance(data, str):
             return {"error": data}, 400
-        try:
-            assert data["mode"] in ["ed25519", "password"]
-            authenticator = AuthProcessor(username, str(data["answer"]),
-                                          data["mode"])
-            if authenticator.result.successful is False:
-                if authenticator.result.error:
-                    return {"error": authenticator.result.error}, 401
-                return {"error": "Authentication failed with an unspecified "
-                        "error."}, 401
-        except AssertionError:
-            return {"error": "Invalid authentication mode."}, 400
-        except KeyError:
-            return {"error": "Missing arguments required to process request."},
-            400
-        except ValueError:
-            return {"error": "User does not exist."}, 404
+        response = self._auth_boilerplate(username, data)
+        if not isinstance(response, AuthProcessor):
+            return response
         invalid_keys = []
         for key in data["new"]:
             if key in DATABASE_KEY_LOOKUP:
