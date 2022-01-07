@@ -9,17 +9,17 @@ A light-weight JWT authentication server.
 import configparser
 from os.path import isfile
 from os import remove
-from typing import List, Literal, Optional, Union, Tuple
+from typing import Literal, Optional, Union, Tuple
 from base64 import b64decode, b64encode
 from random import choice
 from string import ascii_letters
 from ast import literal_eval
 from time import time
+from json import load, dump
 import jwt
 from cryptography.hazmat.primitives.asymmetric import rsa, ed25519
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.exceptions import InvalidSignature, InvalidKey
-from tinydb import TinyDB, where
 from flask import Flask, request
 from flask_restful import Resource, Api
 
@@ -52,13 +52,11 @@ else:
     with open("keys/salt") as salt_handler:
         salt = salt_handler.read()
 
-database = TinyDB("db.json")
-
 config = configparser.ConfigParser()
 config.read("main.cfg")
 
-app = Flask(__name__)
-api = Api(app)
+application = Flask(__name__)
+api = Api(application)
 
 KEY_LOOKUP = {
     "username": str,
@@ -69,6 +67,80 @@ KEY_LOOKUP = {
     "new": dict,
     "mode": str
 }
+
+
+class StorageOperation:
+    """Class for performing operations on user data."""
+
+    def __init__(self, username: str):
+        """
+        Initialize storage operation.
+
+        :param username: username of the user for data operations to be
+            completed upon.
+        :type username: str
+        """
+        self.name: str = username
+        digest = hashes.Hash(hashes.MD5())
+        digest.update((username).encode())
+        self.hash: str = digest.finalize().hex()
+        while isfile("data/locks/" + self.hash):
+            pass
+        with open("data/locks/" + self.hash, "w") as lock_handle:
+            lock_handle.write(str(time()))
+        self.opened: bool = True
+
+    def exists(self) -> bool:
+        """
+        Check if record exists for user.
+
+        :return: whether the record exists
+        :rtype: bool
+        """
+        return isfile("data/" + self.hash)
+
+    def get(self) -> dict:
+        """
+        Get record for user.
+
+        :return: dictionary containing record data
+        :rtype: dict
+        """
+        with open("data/" + self.hash) as record_handler:
+            return load(record_handler)
+
+    def put(self, data: dict) -> None:
+        """
+        Set record for user.
+
+        :param data: dictionary containing record data
+        :type data: dict
+        """
+        if self.opened:
+            with open("data/" + self.hash, "w") as record_handler:
+                dump(data, record_handler)
+
+    def update(self, data: dict) -> None:
+        """
+        Update record for user.
+
+        :param data: dictionary containing record data
+        :type data: dict
+        """
+        new_data = self.get()
+        for key in data:
+            new_data[key] = data[key]
+        self.put(new_data)
+
+    def remove(self) -> None:
+        """Remove record for user."""
+        if self.opened:
+            remove("data/" + self.hash)
+
+    def close(self) -> None:
+        """Remove lock file for user."""
+        remove("data/locks/" + self.hash)
+        self.opened = False
 
 
 class AuthProcessor:
@@ -97,11 +169,12 @@ class AuthProcessor:
         """
         self.username: str = username
         self.answer: str = answer
-        record: List[dict] = database.search(
-            where("username") == self.username)
-        if not record:
+        record_handler = StorageOperation(self.username)
+        if not record_handler.exists():
+            record_handler.close()
             raise ValueError("User does not exist!")
-        self.record: dict = record.pop()
+        self.record: dict = record_handler.get()
+        record_handler.close()
         self.mode: str = mode
         if self.mode == "ed25519":
             if "ed25519key" not in self.record.keys():
@@ -286,8 +359,9 @@ class Auth(Resource):
             return {"errors": data}, 400
         if "email" not in data:
             data["email"] = "user@0.0.0.0"
+        record_handler = StorageOperation(username)
         try:
-            assert not database.search(where("username") == username)
+            assert not record_handler.exists()
             new_user = {
                 "username": username,
                 "email": data["email"],
@@ -303,12 +377,14 @@ class Auth(Resource):
                 new_user.update({
                     "ed25519key": data["ed25519key"]
                 })
-            database.insert(new_user)
+            record_handler.put(new_user)
         except AssertionError:
             return {"error": "User already exists."}, 409
         except KeyError:
             return {"error": "Missing arguments required to process"
                     " request."}, 400
+        finally:
+            record_handler.close()
         return {"info": "User " + username + " successfully created."}, 201
 
     def delete(self, username: str):
@@ -324,7 +400,9 @@ class Auth(Resource):
         response = self._auth_boilerplate(username, data)
         if not isinstance(response, AuthProcessor):
             return response
-        database.remove(where("username") == username)
+        record_handler = StorageOperation(username)
+        record_handler.remove()
+        record_handler.close()
         return {"info": "User " + username + " successfully deleted."}, 200
 
     def patch(self, username: str):
@@ -357,9 +435,12 @@ class Auth(Resource):
                         data["new"][key] = self._auth_password_process(
                             data["new"][key])
                     elif key == "username":
-                        if database.search(where("username") ==
-                                           data["new"][key]):
-                            return {"error": "User already exists."}, 409
+                        if data["new"][key] != username:
+                            record_handler = StorageOperation(data["new"][key])
+                            exists = record_handler.exists()
+                            record_handler.close()
+                            if exists:
+                                return {"error": "User already exists."}, 409
                 else:
                     return {"error", "Argument " + key +
                             " is of invalid type."}
@@ -367,11 +448,15 @@ class Auth(Resource):
                 invalid_keys.append(key)
         for key in invalid_keys:
             data["new"].pop(key)
-        database.update(data["new"], where("username") == username)
+        if "username" in data["new"]:
+            username = data["new"].pop("username")
+        record_handler = StorageOperation(username)
+        record_handler.update(data["new"])
+        record_handler.close()
         return {"info": "User " + username + " successfully updated."}, 200
 
 
 api.add_resource(Auth, "/claims/<string:username>")
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    application.run(debug=True)
