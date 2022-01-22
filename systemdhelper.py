@@ -9,10 +9,10 @@ Description=JWT authentication service over HTTP.
 After=network.target
 
 [Service]
-ExecStart={}
+ExecStart=cd {a} && {a}/start.sh
 
 [Install]
-WantedBy=multi-user.target""".format(input("Enter path to start script: ")))
+WantedBy=multi-user.target""".format(a=input("Enter path to installation: ")))
     prefix = ""
     if isfile("/bin/sudo"):
         prefix = "sudo "
