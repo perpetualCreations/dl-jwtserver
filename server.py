@@ -65,7 +65,8 @@ KEY_LOOKUP = {
     "password": str,
     "answer": str,
     "new": dict,
-    "mode": str
+    "mode": str,
+    "use_namespace": bool
 }
 
 
@@ -217,17 +218,38 @@ class AuthProcessor:
                     self.result = AuthProcessor.AuthResult(
                         False, "Password incorrect.")
 
-    def create_jwt(self) -> str:
-        """Create JSON Web Token for use by user in authentication."""
-        return jwt.encode(
-            {
+    def create_jwt(self, use_custom_namespace: bool = False) -> str:
+        """
+        Create JSON Web Token for use by user in authentication.
+
+        :param use_custom_namespace: whether to include preferred_username,
+            email, and email_verified keys in a custom namespace (under a child
+            dictionary), declared in the server configuration
+        :type use_custom_namespace: bool
+        :return: serialized token
+        :rtype: str
+        """
+        token = {
+            "iss": literal_eval(config["claim"]["iss"]),
+            "sub": literal_eval(config["claim"]["sub"]),
+            "exp": literal_eval(config["claim"]["exp"]) + time(),
+            "preferred_username": self.username,
+            "email": self.record["email"],
+            "email_verified": False
+        }
+        if use_custom_namespace:
+            token = {
                 "iss": literal_eval(config["claim"]["iss"]),
                 "sub": literal_eval(config["claim"]["sub"]),
                 "exp": literal_eval(config["claim"]["exp"]) + time(),
-                "preferred_username": self.username,
-                "email": self.record["email"],
-                "email_verified": False
-            },
+                literal_eval(config["namespace"]["name"]): {
+                    "preferred_username": self.username,
+                    "email": self.record["email"],
+                    "email_verified": False
+                }
+            }
+        return jwt.encode(
+            token,
             private.private_bytes(serialization.Encoding.PEM,
                                   serialization.PrivateFormat.PKCS8,
                                   serialization.NoEncryption()).decode(),
@@ -345,7 +367,10 @@ class Auth(Resource):
         response = self._auth_boilerplate(username, data)
         if not isinstance(response, AuthProcessor):
             return response
-        return {"jwt": response.create_jwt()}, 200
+        use_namespace = False
+        if isinstance(data.get("use_namespace"), bool):
+            use_namespace = data["use_namespace"]
+        return {"jwt": response.create_jwt(use_namespace)}, 200
 
     def put(self, username: str):
         """
